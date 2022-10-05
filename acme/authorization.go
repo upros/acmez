@@ -60,6 +60,9 @@ type Authorization struct {
 	// Wildcard domain names are described in Section 7.1.3.
 	Wildcard bool `json:"wildcard,omitempty"`
 
+	// added for draft-ietf-acme-subdomains
+	SubdomainAuthAllowed bool `json:"subdomainAuthAllowed,omitempty"`
+
 	// "The server allocates a new URL for this authorization and returns a
 	// 201 (Created) response with the authorization URL in the Location
 	// header field" §7.4.1

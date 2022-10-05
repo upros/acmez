@@ -96,6 +96,9 @@ type Identifier struct {
 
 	// value (required, string):  The identifier itself.
 	Value string `json:"value"`
+
+	// parentDomain for draft-ietf-acme-subdomains
+	ParentDomain string `json:"parentDomain,omitempty"`
 }
 
 // NewOrder creates a new order with the server.

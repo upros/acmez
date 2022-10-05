@@ -35,6 +35,7 @@ import (
 
 func main() {
 	err := lowLevelExample()
+	err = subDomainsExample()
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -181,4 +182,153 @@ func lowLevelExample() error {
 	}
 
 	return nil
+}
+
+// Copied from lowLevelExample() but splits the cert ordering into its own function
+
+func subDomainsExample() error {
+
+	fmt.Printf("Entered subDomainsExample\n")
+
+	// a context allows us to cancel long-running ops
+	ctx := context.Background()
+
+	// Logging is important - replace with your own zap logger
+	logger, err := zap.NewDevelopment()
+	if err != nil {
+		return err
+	}
+
+	// Create ACME Client and Account
+
+	accountPrivateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return fmt.Errorf("generating account key: %v", err)
+	}
+	account := acme.Account{
+		Contact:              []string{"mailto:me@example.io"},
+		TermsOfServiceAgreed: true,
+		PrivateKey:           accountPrivateKey,
+	}
+
+	client := &acme.Client{
+		Directory: "https://127.0.0.1:14000/dir", // default pebble endpoint
+		HTTPClient: &http.Client{
+			Transport: &http.Transport{
+				TLSClientConfig: &tls.Config{
+					InsecureSkipVerify: true, // REMOVE THIS FOR PRODUCTION USE!
+				},
+			},
+		},
+		Logger: logger,
+	}
+
+	account, err = client.NewAccount(ctx, account)
+	if err != nil {
+		return fmt.Errorf("new account: %v", err)
+	}
+
+	// Create our subdomain certs
+
+	orderCert(ctx, account, client, "sub1.subs.example.io", "")
+
+	orderCert(ctx, account, client, "sub2.subs.example.io", "example.io")
+
+	orderCert(ctx, account, client, "sub3.subs.example.io", "")
+
+	orderCert(ctx, account, client, "example.org", "")
+
+	orderCert(ctx, account, client, "sub1.example.org", "")
+
+	orderCert(ctx, account, client, "sub2.subdomain.example.org", "")
+
+	return nil
+}
+
+// Code fragments lifted from lowLevelExample()
+
+func orderCert(ctx context.Context, account acme.Account, client *acme.Client, domain string, parent string) error {
+
+	fmt.Printf("orderCert %s %s\n", domain, parent)
+	id := acme.Identifier{Type: "dns", Value: domain, ParentDomain: parent}
+
+	// Create ACME Order
+
+	acmeOrder := acme.Order{Identifiers: []acme.Identifier{id}}
+	order, err := client.NewOrder(ctx, account, acmeOrder)
+	if err != nil {
+		return fmt.Errorf("creating new order: %v", err)
+	}
+
+	if order.Status == acme.StatusReady {
+		fmt.Printf("Order is ready - no need to authorize\n")
+	} else {
+
+		// Complete Authorizations
+		for _, authzURL := range order.Authorizations {
+			authz, err := client.GetAuthorization(ctx, account, authzURL)
+			if err != nil {
+				return fmt.Errorf("getting authorization %q: %v", authzURL, err)
+			}
+
+			// pick any available challenge to solve, pebble is not checking
+			challenge := authz.Challenges[0]
+
+			challenge, err = client.InitiateChallenge(ctx, account, challenge)
+			if err != nil {
+				return fmt.Errorf("initiating challenge %q: %v", challenge.URL, err)
+			}
+
+			authz, err = client.PollAuthorization(ctx, account, authz)
+			if err != nil {
+				return fmt.Errorf("solving challenge: %v", err)
+			}
+
+			// if we got here, then the challenge was solved successfully, hurray!
+		}
+	}
+
+	// finalize the order
+
+	csr, nil := createCSR(domain)
+
+	order, err = client.FinalizeOrder(ctx, account, order, csr.Raw)
+	if err != nil {
+		return fmt.Errorf("finalizing order: %v", err)
+	}
+
+	// download the certificate
+
+	certChains, err := client.GetCertificateChain(ctx, account, order.Certificate)
+	if err != nil {
+		return fmt.Errorf("downloading certs: %v", err)
+	}
+
+	// all done! store it somewhere safe, along with its key
+	for _, cert := range certChains {
+		fmt.Printf("Certificate %q:\n%s\n\n", cert.URL, cert.ChainPEM)
+	}
+
+	return nil
+}
+
+func createCSR(domain string) (*x509.CertificateRequest, error) {
+	// first you need a private key for your certificate
+	certPrivateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return nil, fmt.Errorf("generating certificate key: %v", err)
+	}
+
+	// then you need a certificate request; here's a simple one - we need
+	// to fill out the template, then create the actual CSR, then parse it
+	csrTemplate := &x509.CertificateRequest{DNSNames: []string{domain}}
+	csrDER, err := x509.CreateCertificateRequest(rand.Reader, csrTemplate, certPrivateKey)
+	if err != nil {
+		return nil, fmt.Errorf("generating CSR: %v", err)
+	}
+	csr, err := x509.ParseCertificateRequest(csrDER)
+	if err != nil {
+		return nil, fmt.Errorf("parsing generated CSR: %v", err)
+	}
+	return csr, nil
 }
